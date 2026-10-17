@@ -1,0 +1,100 @@
+# .github/workflows/sync.yml
+
+name: 🚀 Sync Fork with Upstream
+
+# 授予工作流写入仓库内容的权限
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 每天午夜 (UTC) 运行
+  workflow_dispatch:   # 允许手动触发
+
+# --------------------------------------------------------------------
+# 全局环境变量配置区
+# 请根据你的情况修改下面的值
+# --------------------------------------------------------------------
+env:
+  # 1. 上游仓库 (原仓库)
+  UPSTREAM_REPO: "qist/tvbox"
+  
+  # 2. 上游仓库要同步的分支
+  UPSTREAM_BRANCH: "master"
+  
+  # 3. 你的 Fork 仓库要同步的分支
+  FORK_BRANCH: "master"
+  
+  # 4. 工作流文件名
+  WORKFLOW_FILENAME: "sync.yml"
+# --------------------------------------------------------------------
+
+jobs:
+  sync:
+    name: Sync with Upstream
+    runs-on: ubuntu-latest
+    # 确保只在 Fork 的仓库上运行
+    if: github.repository_owner != 'qist'
+
+    steps:
+      - name: Checkout Fork
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.MY_GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Sync and Restore Workflow
+        id: sync
+        run: |
+          set -e # 如果任何命令失败，则立即退出脚本
+
+          # 构造工作流文件的完整路径
+          WORKFLOW_FILE=".github/workflows/${{ env.WORKFLOW_FILENAME }}"
+
+          # 1. 备份我们自己的工作流文件 (如果它存在)
+          if [ -f "$WORKFLOW_FILE" ]; then
+            echo "✅ Backing up workflow file: $WORKFLOW_FILE"
+            mkdir -p /tmp/workflow_backup/.github/workflows/
+            cp "$WORKFLOW_FILE" /tmp/workflow_backup/$WORKFLOW_FILE
+          else
+            echo "⚠️ Warning: Workflow file not found at $WORKFLOW_FILE. Nothing to back up."
+          fi
+
+          # 2. 添加上游仓库并拉取最新内容
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git fetch upstream
+
+          # 3. 硬重置！让本地分支强制与上游分支完全一致
+          echo "Hard resetting to upstream/${{ env.UPSTREAM_BRANCH }}..."
+          git reset --hard upstream/${{ env.UPSTREAM_BRANCH }}
+
+          # 4. 恢复我们备份的工作流文件
+          if [ -f "/tmp/workflow_backup/$WORKFLOW_FILE" ]; then
+            echo "Restoring workflow file..."
+            # 恢复时要确保目录结构也一并恢复
+            cp "/tmp/workflow_backup/$WORKFLOW_FILE" "$WORKFLOW_FILE"
+            git add "$WORKFLOW_FILE"
+          else
+            echo "ℹ️ No backed up workflow file to restore."
+          fi
+          
+          # 5. 检查是否有需要提交的更改
+          if [[ -z $(git status --porcelain) ]]; then
+            echo "✅ Fork is already up to date. No push needed."
+            echo "synced=false" >> $GITHUB_OUTPUT
+          else
+            echo "Changes detected. Committing restored workflow..."
+            git commit -m "chore: [CI] Restore sync workflow after upstream sync"
+            echo "synced=true" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Force Push to Fork
+        if: steps.sync.outputs.synced == 'true'
+        run: |
+          echo "Force pushing changes to origin/${{ env.FORK_BRANCH }}..."
+          git push origin ${{ env.FORK_BRANCH }} --force
